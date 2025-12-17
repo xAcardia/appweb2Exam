@@ -453,12 +453,12 @@ export default function Teacher() {
     try {
       let finalPhoto = user.photoURL || "";
 
-      if (file) {
-        const path = `users/${user.uid}/avatar_${Date.now()}`;
-        const r = ref(storage, path);
-        await uploadBytes(r, file);
-        finalPhoto = await getDownloadURL(r);
-      }
+     if (file) {
+      const path = `users/${user.uid}/avatar_${Date.now()}`;
+      const r = ref(storage,path);
+      await uploadBytes(r,file);
+      finalPhoto = await getDownloadURL(r);
+     } 
 
       await updateProfile(user, {
         displayName: displayName.trim(),
