@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+import ReCAPTCHA from "react-google-recaptcha";
 
 const THEME = {
   bg1: "#071A2B",
@@ -21,6 +22,9 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+
+  // ✅ reCAPTCHA v2 token (checkbox)
+  const [captchaToken, setCaptchaToken] = useState(null);
 
   const styles = useMemo(
     () => ({
@@ -157,10 +161,17 @@ export default function Login() {
         color: THEME.muted,
         lineHeight: 1.45,
       },
+
+      // ✅ petit wrapper pour le captcha (sans toucher au design global)
+      captchaWrap: {
+        marginTop: 10,
+        marginBottom: 2,
+        display: "flex",
+        justifyContent: "center",
+      },
     }),
     []
   );
-
 
   useEffect(() => {
     if (user) navigate("/teacher", { replace: true });
@@ -177,8 +188,8 @@ export default function Login() {
     }
   };
 
-//github 
-const handleGithub = async () => {
+  // github
+  const handleGithub = async () => {
     setError("");
     try {
       await loginGithub();
@@ -188,14 +199,39 @@ const handleGithub = async () => {
     }
   };
 
-
-
-
-
   const handleEmailLogin = async () => {
     setError("");
+
+    //recaptcha
+    if (!captchaToken) {
+      setError("Veuillez confirmer que vous n’êtes pas un robot.");
+      return;
+    }
+
     try {
+      
+      const url =
+        import.meta.env.VITE_RECAPTCHA_VERIFY_URL ||
+        "https://us-central1-examenappweb2.cloudfunctions.net/verifyRecaptcha";
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: captchaToken }),
+      });
+
+      const data = await res.json();
+
+      if (!data?.success) {
+        setError("reCAPTCHA invalide. Réessaie.");
+        return;
+      }
+
+    
       await loginEmailPwd(email, password);
+
+     
+      setCaptchaToken(null);
     } catch (err) {
       console.error(err);
       setError("Échec de connexion. Vérifiez vos identifiants.");
@@ -230,6 +266,15 @@ const handleGithub = async () => {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
+
+          {/* ✅ Checkbox "Je ne suis pas un robot" */}
+          <div style={styles.captchaWrap}>
+            <ReCAPTCHA
+              sitekey={import.meta.env.VITE_RECAPTCHA_V2_SITE_KEY}
+              onChange={(token) => setCaptchaToken(token)}
+              onExpired={() => setCaptchaToken(null)}
+            />
+          </div>
 
           <button style={styles.primaryBtn} onClick={handleEmailLogin}>
             Se connecter

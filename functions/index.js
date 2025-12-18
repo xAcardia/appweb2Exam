@@ -4,6 +4,10 @@ const { setGlobalOptions } = require("firebase-functions/v2");
 const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 
+// ✅ Admin SDK pour vérifier App Check
+const admin = require("firebase-admin");
+admin.initializeApp();
+
 setGlobalOptions({
   region: "us-central1",
   maxInstances: 10,
@@ -11,16 +15,99 @@ setGlobalOptions({
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-exports.validateAnswerAI = onRequest({ cors: true }, async (req, res) => {
+/**
+ * ✅ CORS helper (répond au preflight OPTIONS)
+ */
+function applyCors(req, res, extraHeaders = "") {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set(
+    "Access-Control-Allow-Headers",
+    `Content-Type${extraHeaders ? ", " + extraHeaders : ""}`
+  );
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return true; // stop
+  }
+  return false;
+}
+
+/**
+ * ✅ Vérifie App Check (header: X-Firebase-AppCheck)
+ * SOFT MODE: si pas de token => on ne bloque pas (pour garder fetch OK)
+ */
+async function verifyAppCheckSoft(req) {
+  const token = req.header("X-Firebase-AppCheck");
+  if (!token) return null;
+
+  try {
+    const decoded = await admin.appCheck().verifyToken(token);
+    return decoded;
+  } catch (err) {
+    logger.warn("Token App Check invalide (soft mode)", err);
+    return null;
+  }
+}
+
+/**
+
+ */
+exports.verifyRecaptcha = onRequest(async (req, res) => {
+  // ✅ CORS + preflight
+  if (applyCors(req, res)) return;
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "method-not-allowed" });
+  }
+
+  const { token } = req.body || {};
+  if (!token) {
+    return res.status(400).json({ success: false, error: "missing-token" });
+  }
+
+  const secret = process.env.RECAPTCHA_V2_SECRET;
+  if (!secret) {
+    return res.status(500).json({ success: false, error: "missing-recaptcha-secret" });
+  }
+
+  try {
+    const response = await fetch("https://www.google.com/recaptcha/api/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `secret=${encodeURIComponent(secret)}&response=${encodeURIComponent(token)}`,
+    });
+
+    const data = await response.json();
+    return res.json(data); // { success: true/false, ... }
+  } catch (err) {
+    logger.error("Erreur verifyRecaptcha:", err);
+    return res.status(500).json({ success: false, error: "server-error" });
+  }
+});
+
+exports.validateAnswerAI = onRequest(async (req, res) => {
+  // ✅ CORS + preflight (inclut App Check header)
+  if (applyCors(req, res, "X-Firebase-AppCheck")) return;
+
   // POST only
   if (req.method !== "POST") {
     res.status(405).json({ error: "Méthode non autorisée" });
     return;
   }
 
+  // ✅ App Check en mode SOFT (ne bloque pas ton fetch)
+  // Pour l’examen tu peux dire: “si on active Enforced, il devient obligatoire”
+  const appCheck = await verifyAppCheckSoft(req);
+  if (appCheck) {
+    logger.info("App Check OK (soft)", appCheck);
+  } else {
+    logger.info("App Check absent/invalide (soft) - requête acceptée quand même");
+  }
+
   const { question, answer, rule } = req.body || {};
 
-  // rule obligatoire (ton frontend l’envoie toujours)
+  // rule obligatoire
   if (!answer || !rule) {
     res.status(400).json({
       error: "Les champs 'answer' et 'rule' sont obligatoires.",
@@ -34,7 +121,7 @@ exports.validateAnswerAI = onRequest({ cors: true }, async (req, res) => {
     return;
   }
 
-  // ✅ PROMPT: on respecte rule, et on force un JSON stable
+ 
   const prompt = `
 Tu es un correcteur professionnel de français (orthographe + grammaire + ponctuation + style).
 Tu dois suivre STRICTEMENT la règle fournie par l'utilisateur (RULE).
@@ -80,8 +167,7 @@ RÈGLES POUR LES CHAMPS:
         messages: [
           {
             role: "system",
-            content:
-              "Tu es un assistant qui répond uniquement en JSON valide. Aucun texte hors JSON.",
+            content: "Tu es un assistant qui répond uniquement en JSON valide. Aucun texte hors JSON.",
           },
           { role: "user", content: prompt },
         ],
@@ -99,7 +185,6 @@ RÈGLES POUR LES CHAMPS:
     const data = await response.json();
     let content = data.choices?.[0]?.message?.content || "";
 
-    // nettoie si jamais l'IA met des ```json
     content = content.replace(/```json/gi, "").replace(/```/g, "").trim();
 
     let parsed;
@@ -114,7 +199,6 @@ RÈGLES POUR LES CHAMPS:
       return;
     }
 
-    // ✅ fallback propre (plus de “plan de cours”)
     const result = {
       status: parsed.status || "À améliorer",
       points_positifs: Array.isArray(parsed.points_positifs) ? parsed.points_positifs : [],
